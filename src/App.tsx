@@ -1,121 +1,86 @@
 import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
+import { ApiKeySettings } from './components/ApiKeySettings'
+import { CompanySnapshot } from './components/CompanySnapshot'
+import { MarketDataSettings } from './components/MarketDataSettings'
+import { NewsAnalysisPanel } from './components/NewsAnalysisPanel'
+import { StockSearch } from './components/StockSearch'
+import { useApiKey } from './hooks/useApiKey'
+import { useCompanySnapshot } from './hooks/useCompanySnapshot'
+import { useFinnhubKey } from './hooks/useFinnhubKey'
+import { getProvider } from './lib/ai/providers'
+import type { ProviderId } from './lib/ai/types'
 import './App.css'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [providerId, setProviderId] = useState<ProviderId>('google')
+  const [modelId, setModelId] = useState(getProvider('google').defaultModel)
+  const { apiKey: aiApiKey, setApiKey: setAiApiKey } = useApiKey(providerId)
+  const { apiKey: finnhubApiKey, setApiKey: setFinnhubApiKey } = useFinnhubKey()
+
+  const [symbol, setSymbol] = useState('')
+  const { snapshot, status: snapshotStatus, error: snapshotError } = useCompanySnapshot(
+    symbol,
+    finnhubApiKey,
+  )
+
+  function handleProviderChange(id: ProviderId) {
+    setProviderId(id)
+    setModelId(getProvider(id).defaultModel)
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div className="app-shell">
+      <header>
+        <h1>
+          <span aria-hidden="true">🚀</span> <span className="title-gradient">Stock AI</span>{' '}
+          <span aria-hidden="true">📈</span>
+        </h1>
+        <p>Bring your own API keys! Make your own money! 💰</p>
+      </header>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+      <details className="settings-group">
+        <summary>Settings</summary>
+        <div className="settings-group-body">
+          <ApiKeySettings
+            providerId={providerId}
+            onProviderChange={handleProviderChange}
+            modelId={modelId}
+            onModelChange={setModelId}
+            apiKey={aiApiKey}
+            onApiKeyChange={setAiApiKey}
+          />
+          <MarketDataSettings apiKey={finnhubApiKey} onApiKeyChange={setFinnhubApiKey} />
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      </details>
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      <main>
+        <StockSearch
+          onSubmit={setSymbol}
+          loading={snapshotStatus === 'loading'}
+          activeSymbol={symbol}
+        />
+
+        {symbol && (
+          <>
+            <CompanySnapshot
+              symbol={symbol}
+              apiKey={finnhubApiKey}
+              snapshot={snapshot}
+              status={snapshotStatus}
+              error={snapshotError}
+            />
+            <NewsAnalysisPanel
+              symbol={symbol}
+              finnhubApiKey={finnhubApiKey}
+              snapshot={snapshot}
+              providerId={providerId}
+              modelId={modelId}
+              aiApiKey={aiApiKey}
+            />
+          </>
+        )}
+      </main>
+    </div>
   )
 }
 
