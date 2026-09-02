@@ -1,16 +1,54 @@
 import type { CompanySnapshot, NewsArticle } from '../marketdata/types'
+import type { SentimentAggregate } from '../nlp/types'
+import { ANALYSIS_METRICS } from './metrics'
+
+function signed(n: number): string {
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}`
+}
 
 /**
- * Report structure follows common patterns from financial sentiment-analysis
- * research: sentiment broken out per theme/catalyst rather than one blended
- * score, source-diversity and recency treated as first-class signals (not
- * just headline polarity), and an explicit non-advice framing throughout
- * rather than a bare "buy/sell" verdict.
+ * Renders the locally-computed FinBERT numbers as a prompt section. The LLM is
+ * told to treat these as the measured sentiment and to explain / stress-test
+ * them rather than re-estimate polarity from the headlines itself.
+ */
+function sentimentBlock(s: SentimentAggregate): string {
+  const sourceLines = s.bySource
+    .slice(0, 8)
+    .map((x) => `  - ${x.source}: ${x.count} article(s), avg ${signed(x.meanSigned)}`)
+    .join('\n')
+
+  return `## Quantitative sentiment signal — FinBERT, computed locally on the reader's machine (NOT your estimate)
+FinBERT (BERT fine-tuned on financial text) classified ${s.articleCount} recent articles:
+- Label counts: ${s.distribution.positive} positive / ${s.distribution.neutral} neutral / ${s.distribution.negative} negative
+- Mean sentiment score: ${signed(s.meanSigned)} on a −1 (max bearish) … +1 (max bullish) scale
+- Recency-weighted score (7-day half-life): ${signed(s.recencyWeightedSigned)}
+- Net signal: ${s.net.toUpperCase()} · model-derived confidence: ${s.confidence.toUpperCase()} (label agreement ${Math.round(s.agreement * 100)}%, ${s.sourceCount} distinct sources)
+Per source:
+${sourceLines || '  - (none)'}
+
+Treat these numbers as the measured direction and magnitude of news sentiment. Your job is to explain WHY the coverage carries this sentiment, whether it should be trusted (source concentration, stale coverage, single-outlet claims), and how it squares with the fundamentals — not to re-score polarity yourself. Do not flip the sign of the FinBERT net signal unless a specific headline plainly contradicts it; if you do, say which one and why.`
+}
+
+/** The metric rubric, rendered from ANALYSIS_METRICS so prompt and UI stay in sync. */
+function metricRubric(): string {
+  return ANALYSIS_METRICS.map(
+    (m) => `- ${m.key}: 0 = ${m.low}; 100 = ${m.high}`,
+  ).join('\n')
+}
+
+/**
+ * Produces a prompt whose output is a small JSON object: a one-paragraph
+ * synthesis, a directional lean, and a 0–100 score + rationale for each of the
+ * curated dimensions in ANALYSIS_METRICS. Sentiment-research framing carries
+ * over from the earlier long-form version — per-dimension scoring rather than
+ * one blended number, source diversity and recency as first-class signals,
+ * and an explicit non-advice stance.
  */
 export function buildAnalysisPrompt(
   symbol: string,
   snapshot: CompanySnapshot,
   articles: NewsArticle[],
+  sentiment?: SentimentAggregate,
 ): string {
   const sourceCounts = new Map<string, number>()
   for (const a of articles) {
@@ -59,24 +97,23 @@ export function buildAnalysisPrompt(
     )
   }
 
-  return `You are a financial research assistant producing a preliminary, informational news-sentiment report for a retail investor. You are given real news headlines/summaries retrieved from a data API (not written or selected by you) and some fundamentals. Do not invent facts, prices, or events not present in the data below.
+  return `You are a financial research assistant producing a preliminary, informational read on recent news for a retail investor. You are given real news headlines/summaries retrieved from a data API (not written or selected by you), some fundamentals, and${sentiment ? ' a locally-computed FinBERT sentiment breakdown' : ' (no model sentiment breakdown this run)'}. Do not invent facts, prices, or events not present in the data below. Base every score, note, and sentence only on this data.
 
 ## Company snapshot (non-AI sourced data)
 ${fundamentalsLines.join('\n') || 'No fundamentals data available.'}
 
 ## Recent news for ${symbol} (${articles.length} articles from ${sourceCounts.size} distinct sources: ${sourceSummary || 'none'})
 ${articleList || 'No recent news articles were found.'}
+${sentiment ? `\n${sentimentBlock(sentiment)}\n` : ''}
+## Output — a JSON object with these fields:
 
-## Write the report with these sections, in markdown:
+- "synthesis": ONE paragraph, 3-5 sentences, plain prose (no markdown, no headings, no lists). A general read on what the recent coverage says and the near-term stock outlook. Hedged and informational — not a recommendation.
+- "lean": one of bullish | bearish | neutral | mixed — the directional lean of the public news signal above${sentiment ? ", consistent with the FinBERT net signal unless a specific headline plainly contradicts it" : ''}. This is a summary of sentiment, not a price prediction.
+- "confidence": one of low | medium | high — how much weight the lean deserves, based on source agreement, source diversity, and article volume${sentiment ? ` (FinBERT's own model-derived confidence this run is ${sentiment.confidence.toUpperCase()})` : ''}.
+- "metrics": an array with exactly one entry per key below — {"key", "score" (integer 0-100), "note" (1-2 sentences citing dates/sources from the news above)}.
 
-1. **Overview** — 2-3 sentences on what the recent coverage is broadly about and the overall tone.
-2. **Sentiment by theme** — group the news into 2-5 themes (e.g. earnings, product, regulatory, macro, leadership, litigation). For each theme give a sentiment label (Positive / Negative / Neutral / Mixed), 1-2 sentences of rationale, and cite which articles it's based on by date+source.
-3. **Source & recency context** — comment on how many distinct outlets are represented, whether they agree or conflict, and whether the coverage is fresh or stale. Low source diversity or single-source claims should be flagged as lower-confidence.
-4. **Catalysts & risks** — bullet list of concrete upcoming or recent events mentioned in the articles that could move the stock (earnings dates, product launches, regulatory decisions, etc).
-5. **Fundamentals cross-check** — 1-2 sentences on whether the news sentiment is consistent with or contradicts the snapshot data above (e.g. elevated valuation vs. negative news).
-6. **Preliminary lean** — a directional lean purely as a summary of what the public sentiment signal above shows, not a prediction or recommendation. This section MUST end with a line in exactly this format, with no other text on that line:
-   \`LEAN: <BULLISH|BEARISH|NEUTRAL|MIXED> · CONFIDENCE: <LOW|MEDIUM|HIGH>\`
-   (choose exactly one word per placeholder, in that exact casing, based on source agreement and volume)
+Metric keys and what the ends of the 0-100 scale mean:
+${metricRubric()}
 
-End with this exact disclaimer on its own line: "This is an automated summary of public news sentiment for informational purposes only. It is not financial advice — do your own research before making investment decisions."`
+Also return this exact sentence as the last one of "synthesis": "This is an automated summary of public news sentiment for informational purposes only, not financial advice."`
 }

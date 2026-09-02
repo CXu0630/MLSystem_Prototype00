@@ -35,6 +35,12 @@ export interface KeyMetrics {
   beta?: number
   week52High?: number
   week52Low?: number
+  /** Trailing price returns in %, from Finnhub's `*PriceReturnDaily` fields. */
+  priceReturn5D?: number
+  priceReturn13W?: number
+  priceReturn26W?: number
+  priceReturn52W?: number
+  priceReturnYTD?: number
 }
 
 export interface RecommendationTrend {
@@ -63,6 +69,10 @@ export interface NewsArticle {
   source: string
   url: string
   datetime: number
+  /** Popularity signal, when the feed provides one (Finnhub usually doesn't). */
+  views?: number
+  /** Comma-separated tickers Finnhub tagged on the article; long ⇒ market piece. */
+  related?: string
 }
 
 export interface CompanySnapshot {

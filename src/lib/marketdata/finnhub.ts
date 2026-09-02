@@ -132,6 +132,11 @@ async function getKeyMetrics(symbol: string, apiKey: string): Promise<KeyMetrics
     beta: firstNumber(metric, ['beta']),
     week52High: firstNumber(metric, ['52WeekHigh']),
     week52Low: firstNumber(metric, ['52WeekLow']),
+    priceReturn5D: firstNumber(metric, ['5DayPriceReturnDaily']),
+    priceReturn13W: firstNumber(metric, ['13WeekPriceReturnDaily']),
+    priceReturn26W: firstNumber(metric, ['26WeekPriceReturnDaily']),
+    priceReturn52W: firstNumber(metric, ['52WeekPriceReturnDaily']),
+    priceReturnYTD: firstNumber(metric, ['yearToDatePriceReturnDaily', 'ytdPriceReturnDaily']),
   }
 }
 
@@ -207,6 +212,10 @@ export async function getCompanyNews(
       source?: string
       url?: string
       datetime?: number
+      related?: string
+      // Not part of Finnhub's documented schema, but read it defensively in
+      // case a feed (or a future source) surfaces a popularity count.
+      views?: number
     }>
   >('/company-news', { symbol, from: fromDate, to: toDate }, apiKey)
 
@@ -219,6 +228,8 @@ export async function getCompanyNews(
       source: a.source ?? 'Unknown',
       url: a.url!,
       datetime: a.datetime ?? 0,
+      related: a.related ?? '',
+      views: typeof a.views === 'number' && a.views > 0 ? a.views : undefined,
     }))
     .sort((a, b) => b.datetime - a.datetime)
 }

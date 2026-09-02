@@ -8,4 +8,10 @@ export default defineConfig({
   // at https://cxu0630.github.io/MLSystem_Prototype00/
   base: '/MLSystem_Prototype00/',
   plugins: [react()],
+  // Transformers.js pulls in onnxruntime-web (large, ships its own .wasm and
+  // uses import.meta tricks esbuild's dep pre-bundler chokes on). Let Vite
+  // load it as a plain ESM dependency instead of trying to optimize it.
+  optimizeDeps: {
+    exclude: ['@huggingface/transformers'],
+  },
 })

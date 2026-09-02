@@ -1,20 +1,30 @@
-import { streamText } from 'ai'
 import { useEffect, useMemo, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import { parseLean, stripLeanTag } from '../lib/ai/parseLean'
-import { buildAnalysisPrompt } from '../lib/ai/prompts'
+import { type AnalysisResult, type Lean, generateAnalysis } from '../lib/ai/analysis'
 import { getProvider } from '../lib/ai/providers'
 import type { ProviderId } from '../lib/ai/types'
 import { getCompanyNews } from '../lib/marketdata/finnhub'
+import { filterCompanyNews, namesCompany } from '../lib/marketdata/relevance'
 import type { CompanySnapshot, NewsArticle } from '../lib/marketdata/types'
+import { aggregateSentiment, selectGridArticles } from '../lib/nlp/aggregate'
+import { classifyArticles, isModelReady } from '../lib/nlp/finbert'
+import type { ArticleSentiment, SentimentAggregate } from '../lib/nlp/types'
+import { AnalysisMetrics } from './AnalysisMetrics'
+import { SentimentGrid } from './SentimentGrid'
 
-const LEAN_TEXT = { bullish: 'BUY', bearish: 'SELL', neutral: 'HOLD' } as const
-const LEAN_EMOJI = { bullish: '📈', bearish: '📉', neutral: '✋' } as const
+const LEAN_TEXT: Record<Lean, string> = {
+  bullish: 'BUY',
+  bearish: 'SELL',
+  neutral: 'HOLD',
+  mixed: 'MIXED',
+}
+const LEAN_EMOJI: Record<Lean, string> = {
+  bullish: '📈',
+  bearish: '📉',
+  neutral: '✋',
+  mixed: '🤔',
+}
 
-function LeanBadge({ report }: { report: string }) {
-  const { lean, confidence } = useMemo(() => parseLean(report), [report])
-  if (!lean) return null
-
+function LeanBadge({ lean, confidence }: { lean: Lean; confidence: string }) {
   return (
     <div className="lean-badge-wrap">
       <span className={`lean-badge lean-${lean}`}>
@@ -23,7 +33,7 @@ function LeanBadge({ report }: { report: string }) {
         <span className={lean === 'bullish' ? 'shine-anim' : undefined}>{LEAN_TEXT[lean]}</span>{' '}
         <span aria-hidden="true">{LEAN_EMOJI[lean]}</span>
       </span>
-      {confidence && <span className="lean-confidence">{confidence} confidence</span>}
+      <span className="lean-confidence">{confidence} confidence</span>
     </div>
   )
 }
@@ -38,9 +48,14 @@ interface NewsAnalysisPanelProps {
 }
 
 type NewsStatus = 'idle' | 'loading' | 'error'
-type ReportStatus = 'idle' | 'streaming' | 'error'
+type ReportStatus = 'idle' | 'loading' | 'error'
+type SentStatus = 'idle' | 'loading-model' | 'classifying' | 'done' | 'error'
 
 const LOOKBACK_DAYS = 14
+/** Upper bound on how many articles we run through FinBERT per analysis. */
+const MAX_CLASSIFY = 30
+/** How many article cards to feature in the grid. */
+const GRID_SIZE = 6
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10)
@@ -58,7 +73,13 @@ export function NewsAnalysisPanel({
   const [newsStatus, setNewsStatus] = useState<NewsStatus>('idle')
   const [newsError, setNewsError] = useState('')
 
-  const [report, setReport] = useState('')
+  const [sentStatus, setSentStatus] = useState<SentStatus>('idle')
+  const [sentError, setSentError] = useState('')
+  const [modelPct, setModelPct] = useState(0)
+  const [gridItems, setGridItems] = useState<ArticleSentiment[]>([])
+  const [aggregate, setAggregate] = useState<SentimentAggregate | null>(null)
+
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null)
   const [reportStatus, setReportStatus] = useState<ReportStatus>('idle')
   const [reportError, setReportError] = useState('')
 
@@ -71,7 +92,13 @@ export function NewsAnalysisPanel({
     let cancelled = false
     setNewsStatus('loading')
     setNewsError('')
-    setReport('')
+    setAnalysis(null)
+    setReportStatus('idle')
+    setReportError('')
+    setSentStatus('idle')
+    setSentError('')
+    setGridItems([])
+    setAggregate(null)
 
     const to = new Date()
     const from = new Date(to.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
@@ -93,41 +120,88 @@ export function NewsAnalysisPanel({
     }
   }, [symbol, finnhubApiKey])
 
+  // Finnhub's company-news feed still leaks in market round-ups and listicles
+  // where the company is one mention among many — drop those before anything
+  // downstream (raw list, FinBERT, the LLM) sees them.
+  const relevantArticles = useMemo(() => filterCompanyNews(articles), [articles])
+  const droppedCount = articles.length - relevantArticles.length
+
+  const companyRef = useMemo(
+    () => ({ symbol, companyName: snapshot?.profile?.name }),
+    [symbol, snapshot?.profile?.name],
+  )
+
   const bySource = useMemo(() => {
     const groups = new Map<string, NewsArticle[]>()
-    for (const a of articles) {
+    for (const a of relevantArticles) {
       const list = groups.get(a.source) ?? []
       list.push(a)
       groups.set(a.source, list)
     }
     return Array.from(groups.entries()).sort((a, b) => b[1].length - a[1].length)
-  }, [articles])
+  }, [relevantArticles])
 
-  async function generateReport() {
+  const busy =
+    sentStatus === 'loading-model' || sentStatus === 'classifying' || reportStatus === 'loading'
+
+  async function runAnalysis() {
+    if (relevantArticles.length === 0) {
+      setSentStatus('error')
+      setSentError('No news articles to analyze yet.')
+      return
+    }
+
+    // 1. Local NLP pass — FinBERT in the browser. Works with zero API keys.
+    let agg: SentimentAggregate | null = null
+    const batch = relevantArticles.slice(0, MAX_CLASSIFY)
+    try {
+      setSentStatus(isModelReady() ? 'classifying' : 'loading-model')
+      setSentError('')
+      setModelPct(0)
+      setGridItems([])
+      setAggregate(null)
+
+      const scored = await classifyArticles(batch, (p) => {
+        setModelPct(p.pct)
+        if (p.pct >= 100) setSentStatus('classifying')
+      })
+
+      setSentStatus('classifying')
+      agg = aggregateSentiment(scored)
+      setGridItems(selectGridArticles(scored, GRID_SIZE, (a) => namesCompany(a, companyRef)))
+      setAggregate(agg)
+      setSentStatus('done')
+    } catch (err) {
+      setSentStatus('error')
+      setSentError(
+        err instanceof Error ? err.message : 'FinBERT failed to load or run in this browser.',
+      )
+      // fall through — the written synthesis can still run without the numbers.
+    }
+
+    // 2. LLM synthesis — scored dimensions + a one-paragraph read, grounded on
+    //    the FinBERT numbers when we have them.
     if (!aiApiKey) {
       setReportStatus('error')
-      setReportError('Add an AI provider API key in settings first.')
-      return
-    }
-    if (articles.length === 0) {
-      setReportStatus('error')
-      setReportError('No news articles to analyze yet.')
+      setReportError('Add an AI provider API key in settings to generate the written synthesis.')
       return
     }
 
-    setReportStatus('streaming')
+    setReportStatus('loading')
     setReportError('')
-    setReport('')
+    setAnalysis(null)
 
     try {
       const provider = getProvider(providerId)
       const model = provider.createModel(aiApiKey, modelId || provider.defaultModel)
-      const prompt = buildAnalysisPrompt(symbol, snapshot ?? { symbol, unavailable: {} }, articles)
-      const result = streamText({ model, prompt })
-
-      for await (const chunk of result.textStream) {
-        setReport((prev) => prev + chunk)
-      }
+      const result = await generateAnalysis({
+        model,
+        symbol,
+        snapshot: snapshot ?? { symbol, unavailable: {} },
+        articles: relevantArticles,
+        sentiment: agg ?? undefined,
+      })
+      setAnalysis(result)
       setReportStatus('idle')
     } catch (err) {
       setReportStatus('error')
@@ -144,6 +218,11 @@ export function NewsAnalysisPanel({
     )
   }
 
+  let buttonLabel = analysis ? 'Re-run analysis' : 'Analyze news'
+  if (sentStatus === 'loading-model') buttonLabel = `Downloading FinBERT… ${modelPct}%`
+  else if (sentStatus === 'classifying') buttonLabel = 'Running FinBERT…'
+  else if (reportStatus === 'loading') buttonLabel = 'Scoring the news…'
+
   return (
     <section className="news-panel">
       <h2>News & sentiment</h2>
@@ -158,13 +237,22 @@ export function NewsAnalysisPanel({
       {bySource.length > 0 && (
         <>
           <p className="hint">
-            {articles.length} articles from {bySource.length} sources, last {LOOKBACK_DAYS} days —
-            fetched directly from Finnhub, no AI involved yet.
+            {relevantArticles.length} articles from {bySource.length} sources, last {LOOKBACK_DAYS}{' '}
+            days — fetched directly from Finnhub, no AI involved yet.
+            {droppedCount > 0 && (
+              <>
+                {' '}
+                {droppedCount} market round-{droppedCount === 1 ? 'up' : 'ups'} / listicle
+                {droppedCount === 1 ? '' : 's'} set aside.
+              </>
+            )}
           </p>
           <details className="raw-news">
-            <summary>Show raw headlines ({bySource.map(([s, a]) => `${s} ${a.length}`).join(', ')})</summary>
+            <summary>
+              Show raw headlines ({bySource.map(([s, a]) => `${s} ${a.length}`).join(', ')})
+            </summary>
             <ul>
-              {articles.slice(0, 30).map((a) => (
+              {relevantArticles.slice(0, 30).map((a) => (
                 <li key={a.id || a.url}>
                   <a href={a.url} target="_blank" rel="noreferrer">
                     {a.headline}
@@ -180,24 +268,43 @@ export function NewsAnalysisPanel({
           <button
             type="button"
             className="btn-primary btn-gold"
-            onClick={generateReport}
-            disabled={reportStatus === 'streaming'}
+            onClick={runAnalysis}
+            disabled={busy}
+            aria-busy={busy}
           >
-            {reportStatus === 'streaming' ? 'Analyzing…' : 'Generate AI report'}
+            {busy && <span className="btn-spinner" aria-hidden="true" />}
+            {buttonLabel}
           </button>
+
+          {sentStatus === 'loading-model' && (
+            <p className="hint">
+              First run only: downloading the FinBERT model (~110&nbsp;MB) from the Hugging Face
+              CDN. It's cached in your browser afterward, then runs offline.
+            </p>
+          )}
+          {sentStatus === 'classifying' && (
+            <p className="hint">
+              Classifying {Math.min(relevantArticles.length, MAX_CLASSIFY)} headlines locally…
+            </p>
+          )}
+          {sentStatus === 'error' && (
+            <p className="error">FinBERT: {sentError} — continuing with the written synthesis only.</p>
+          )}
         </>
       )}
 
+      {sentStatus === 'done' && aggregate && gridItems.length > 0 && (
+        <SentimentGrid items={gridItems} aggregate={aggregate} />
+      )}
+
       {reportStatus === 'error' && <p className="error">{reportError}</p>}
-      {report && (
+      {analysis && (
         <div className="windfall">
           <p className="windfall-kicker">
             <span aria-hidden="true">✨</span> <span className="kicker-gradient">Windfall Report</span>
           </p>
-          <LeanBadge report={report} />
-          <div className="report">
-            <ReactMarkdown>{stripLeanTag(report)}</ReactMarkdown>
-          </div>
+          <LeanBadge lean={analysis.lean} confidence={analysis.confidence} />
+          <AnalysisMetrics result={analysis} />
         </div>
       )}
     </section>

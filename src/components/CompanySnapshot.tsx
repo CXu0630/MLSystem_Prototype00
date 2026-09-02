@@ -1,4 +1,4 @@
-import type { CompanySnapshot as Snapshot } from '../lib/marketdata/types'
+import type { CompanySnapshot as Snapshot, KeyMetrics } from '../lib/marketdata/types'
 
 interface CompanySnapshotProps {
   symbol: string
@@ -69,6 +69,8 @@ export function CompanySnapshot({ symbol, apiKey, snapshot, status, error }: Com
           </span>
         </div>
       )}
+
+      {metrics && <PriceReturnChart metrics={metrics} />}
 
       <h3>At a glance</h3>
       <div className="stat-grid">
@@ -146,6 +148,52 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="stat">
       <span className="stat-label">{label}</span>
       <span className="stat-value">{value}</span>
+    </div>
+  )
+}
+
+const RETURN_PERIODS: { key: keyof KeyMetrics; label: string }[] = [
+  { key: 'priceReturn5D', label: '5D' },
+  { key: 'priceReturn13W', label: '3M' },
+  { key: 'priceReturn26W', label: '6M' },
+  { key: 'priceReturnYTD', label: 'YTD' },
+  { key: 'priceReturn52W', label: '1Y' },
+]
+
+/** Tiny bar chart of trailing price return over a few standard windows. */
+function PriceReturnChart({ metrics }: { metrics: KeyMetrics }) {
+  const points = RETURN_PERIODS.map((p) => ({ label: p.label, pct: metrics[p.key] })).filter(
+    (p): p is { label: string; pct: number } => typeof p.pct === 'number',
+  )
+
+  if (points.length < 2) return null
+
+  const max = Math.max(...points.map((p) => Math.abs(p.pct)), 1)
+
+  return (
+    <div className="return-chart">
+      <span className="return-chart-title">Price return</span>
+      <div className="return-bars">
+        {points.map((p) => {
+          const up = p.pct >= 0
+          const height = `${(Math.abs(p.pct) / max) * 100}%`
+          return (
+            <div className="return-col" key={p.label}>
+              <div className="return-track">
+                <span
+                  className={up ? 'return-bar up' : 'return-bar down'}
+                  style={up ? { height, bottom: '50%' } : { height, top: '50%' }}
+                />
+              </div>
+              <span className={up ? 'return-val up' : 'return-val down'}>
+                {up ? '+' : ''}
+                {p.pct.toFixed(1)}%
+              </span>
+              <span className="return-label">{p.label}</span>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
